@@ -159,14 +159,9 @@ def main():
     # 设置背景颜色
     background_color = (0, 0, 0)  # 黑色
 
-    # 加载主页面图片 (map_01.png)
-    try:
-        menu_image = pygame.image.load(resolve_asset("map_01.png"))
-        menu_image = pygame.transform.scale(menu_image, (screen_width, screen_height))
-    except (pygame.error, FileNotFoundError):
-        print("无法加载 map_01.png，使用默认背景")
-        menu_image = pygame.Surface((screen_width, screen_height))
-        menu_image.fill((0, 0, 0))
+    # 主页面背景（纯色，去掉草坪图）
+    menu_image = pygame.Surface((screen_width, screen_height))
+    menu_image.fill((18, 22, 28))
     
     # 加载玩家图像
     try:
@@ -3668,6 +3663,10 @@ def main():
         
         if moshi == 0:
             screen.blit(menu_image, (0, 0))
+            start_font = get_chinese_font(48)
+            start_text = start_font.render("按空格开始", True, (230, 230, 230))
+            start_rect = start_text.get_rect(center=(screen_width // 2, screen_height // 2 + 120))
+            screen.blit(start_text, start_rect)
         elif moshi == 3:
             # 目录页面：白色背景，上方留空给游戏名，下方两个按钮
             screen.fill((255, 255, 255))
