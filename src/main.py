@@ -196,6 +196,11 @@ def main():
     red_tint = pygame.Surface(elite_enemy_image.get_size())
     red_tint.fill((80, 0, 0))  # 叠加红色
     elite_enemy_image.blit(red_tint, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
+    # 僵尸图像：敌人底图叠加绿色
+    zombie_image = enemy_image.copy()
+    green_tint = pygame.Surface(zombie_image.get_size())
+    green_tint.fill((0, 90, 0))
+    zombie_image.blit(green_tint, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
     
     # 加载Boss坦克图像 (tank_blue.png)
     try:
@@ -306,6 +311,7 @@ def main():
     # 敌人血量显示开关
     show_enemy_health = False  # 按7切换
     left_mouse_down = False # 新增：跟踪鼠标左键是否按下
+    infinite_ammo = False  # 按L切换无限弹药
 
     # 定义 Obstacle 类
     class Obstacle(pygame.sprite.Sprite):
@@ -723,7 +729,7 @@ def main():
             # 切换到下一把枪
             self.switch_weapon(next_weapon_name)
 
-        def update(self, keys, world_width, world_height, current_time, obstacles, map_level=None, min_map_level=None):
+        def update(self, keys, world_width, world_height, current_time, obstacles, map_level=None, min_map_level=None, infinite_ammo=False):
             # 记录当前位置，用于判断是否移动
             old_x, old_y = self.rect.x, self.rect.y
 
@@ -806,6 +812,9 @@ def main():
                 self.stamina = min(self.stamina, self.max_stamina)
 
             # 换弹逻辑（使用当前枪械的属性）
+            if infinite_ammo:
+                self.reloading = False
+                self.current_bullets = self.max_clip_bullets
             if self.reloading:
                 if current_time - self.reload_start_time >= self.reload_duration:
                     # 完成换弹
@@ -1492,6 +1501,137 @@ def main():
             pygame.draw.rect(surface, (140, 110, 70), (sx, sy, self.rect.width, self.rect.height), 3)
             # 简单箱子图案
             pygame.draw.rect(surface, (60, 50, 40), (sx + 8, sy + 8, self.rect.width - 16, self.rect.height - 16))
+
+    class KeyItem(pygame.sprite.Sprite):
+        def __init__(self, x, y):
+            super().__init__()
+            self.image = pygame.Surface((24, 24), pygame.SRCALPHA)
+            pygame.draw.circle(self.image, (255, 215, 0), (8, 12), 6, 2)
+            pygame.draw.rect(self.image, (255, 215, 0), (12, 10, 8, 4))
+            pygame.draw.rect(self.image, (255, 215, 0), (17, 8, 2, 2))
+            pygame.draw.rect(self.image, (255, 215, 0), (17, 14, 2, 2))
+            self.rect = self.image.get_rect(center=(x, y))
+            self.collected = False
+
+        def draw(self, surface, camera_x, camera_y):
+            if not self.collected:
+                surface.blit(self.image, (self.rect.x - camera_x, self.rect.y - camera_y))
+
+    class SafeBox(pygame.sprite.Sprite):
+        def __init__(self, x, y, reward_coins=35, reward_ammo=45):
+            super().__init__()
+            self.rect = pygame.Rect(x - 28, y - 28, 56, 56)
+            self.opened = False
+            self.reward_coins = reward_coins
+            self.reward_ammo = reward_ammo
+
+        def draw(self, surface, camera_x, camera_y):
+            sx = self.rect.x - camera_x
+            sy = self.rect.y - camera_y
+            color = (55, 85, 95) if not self.opened else (70, 110, 120)
+            pygame.draw.rect(surface, color, (sx, sy, self.rect.width, self.rect.height))
+            pygame.draw.rect(surface, (170, 200, 210), (sx, sy, self.rect.width, self.rect.height), 2)
+            if not self.opened:
+                pygame.draw.circle(surface, (230, 230, 230), (sx + 28, sy + 28), 9, 2)
+            else:
+                pygame.draw.line(surface, (120, 220, 120), (sx + 10, sy + 10), (sx + 46, sy + 46), 3)
+
+    class LockedDoor(pygame.sprite.Sprite):
+        def __init__(self, x, y, width=28, height=120):
+            super().__init__()
+            self.is_wall = True
+            self.is_open = False
+            self.image = pygame.Surface((width, height))
+            self.image.fill((120, 90, 35))
+            pygame.draw.rect(self.image, (200, 170, 80), (0, 0, width, height), 2)
+            pygame.draw.circle(self.image, (220, 200, 80), (width // 2, height // 2), 6, 2)
+            self.rect = self.image.get_rect(topleft=(x, y))
+
+        def draw(self, surface, camera_x, camera_y):
+            if not self.is_open:
+                surface.blit(self.image, (self.rect.x - camera_x, self.rect.y - camera_y))
+
+    class Zombie(pygame.sprite.Sprite):
+        def __init__(self, x, y, image):
+            super().__init__()
+            self.original_image = image
+            self.image = image
+            self.rect = self.image.get_rect(center=(x, y))
+            self.facing_angle = 0
+            self.speed = 1.6
+            self.health = 120
+            self.max_health = 120
+            self.damage = 18
+            self.attack_range = 46
+            self.attack_cooldown = 900
+            self.last_attack_time = 0
+
+        def update(self, player, current_time, obstacles, enemy_targets=None, boss_targets=None):
+            if enemy_targets is None:
+                enemy_targets = []
+            if boss_targets is None:
+                boss_targets = []
+            target = player
+            target_group = "player"
+            closest_enemy_dist = float("inf")
+            for enemy in enemy_targets:
+                if enemy.health <= 0:
+                    continue
+                d = math.sqrt((enemy.rect.centerx - self.rect.centerx) ** 2 + (enemy.rect.centery - self.rect.centery) ** 2)
+                if d < closest_enemy_dist:
+                    closest_enemy_dist = d
+                    target = enemy
+                    target_group = "enemy"
+            for boss in boss_targets:
+                if boss.health <= 0:
+                    continue
+                d = math.sqrt((boss.rect.centerx - self.rect.centerx) ** 2 + (boss.rect.centery - self.rect.centery) ** 2)
+                if d < closest_enemy_dist:
+                    closest_enemy_dist = d
+                    target = boss
+                    target_group = "boss"
+
+            dx = target.rect.centerx - self.rect.centerx
+            dy = target.rect.centery - self.rect.centery
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > 0:
+                dir_x = dx / dist
+                dir_y = dy / dist
+                self.facing_angle = math.degrees(math.atan2(-dir_y, dir_x))
+            else:
+                dir_x, dir_y = 0, 0
+
+            if dist > self.attack_range:
+                move_x = dir_x * self.speed
+                move_y = dir_y * self.speed
+                self.rect.x += int(move_x)
+                for obstacle in obstacles:
+                    if self.rect.colliderect(obstacle.rect):
+                        self.rect.x -= int(move_x)
+                        break
+                self.rect.y += int(move_y)
+                for obstacle in obstacles:
+                    if self.rect.colliderect(obstacle.rect):
+                        self.rect.y -= int(move_y)
+                        break
+            elif current_time - self.last_attack_time >= self.attack_cooldown:
+                self.last_attack_time = current_time
+                if target_group == "player":
+                    if player.armor >= self.damage:
+                        player.armor -= self.damage
+                    else:
+                        remaining = self.damage - player.armor
+                        player.armor = 0
+                        player.health = max(0, player.health - remaining)
+                    player.last_damage_time = current_time
+                    player.last_armor_damage_time = current_time
+                else:
+                    target.health -= self.damage
+
+        def draw(self, surface, camera_x, camera_y):
+            rotated = pygame.transform.rotate(self.original_image, self.facing_angle)
+            rr = rotated.get_rect(center=(self.rect.centerx - camera_x, self.rect.centery - camera_y))
+            surface.blit(rotated, rr)
     
     # === 手雷类 ===
     class Grenade(pygame.sprite.Sprite):
@@ -2041,6 +2181,43 @@ def main():
                 continue
             out.append((x, y))
         return out
+
+    def generate_zombies_for_map(obstacles_list, zombie_img, count=6):
+        zombies = []
+        z_rect = zombie_img.get_rect()
+        zw, zh = z_rect.width, z_rect.height
+        margin = max(zw, zh) // 2 + 10
+        for _ in range(count * 6):
+            if len(zombies) >= count:
+                break
+            x = random.randint(margin, world_width - margin)
+            y = random.randint(margin, world_height - 450)
+            test_rect = pygame.Rect(x - zw // 2, y - zh // 2, zw, zh)
+            if test_rect.colliderect(player.rect):
+                continue
+            if any(test_rect.colliderect(o.rect) for o in obstacles_list):
+                continue
+            if any(test_rect.colliderect(z.rect.inflate(20, 20)) for z in zombies):
+                continue
+            zombies.append(Zombie(x, y, zombie_img))
+        return zombies
+
+    def pick_free_rect(obstacles_list, width, height, used_rects=None, attempts=300):
+        if used_rects is None:
+            used_rects = []
+        margin = 80
+        for _ in range(attempts):
+            x = random.randint(margin, world_width - width - margin)
+            y = random.randint(margin, world_height - height - 500)
+            rect = pygame.Rect(x, y, width, height)
+            if rect.colliderect(player.rect.inflate(220, 220)):
+                continue
+            if any(rect.colliderect(o.rect) for o in obstacles_list):
+                continue
+            if any(rect.colliderect(u) for u in used_rects):
+                continue
+            return rect
+        return None
     
     def generate_medkits_for_stage1(player_pos, enemies_list, obstacles_list, count=3):
         """为关卡1生成医疗包；当前已清空，不生成任何物品"""
@@ -2511,6 +2688,12 @@ def main():
     ammo_boxes_for_current_map = []  # 所有地图的弹药箱列表
     weapon_drops_for_current_map = []  # 所有地图的武器掉落物列表
     containers_for_current_map = []   # 当前地图的容器（按 E 花 3 秒拾取，得手雷/金币/子弹）
+    zombies_for_current_map = []  # 当前地图僵尸
+    safes_for_current_map = []  # 当前地图保险箱
+    locked_doors_for_current_map = []  # 当前地图钥匙门
+    key_item_for_current_map = None  # 当前地图钥匙
+    player_has_key = False
+    dynamic_content_map_level = None
     corpses_for_current_map = []  # 当前地图上的尸体（敌人/Boss 死后留下）
     explosions = []  # 爆炸特效列表
     boss_list = []  # Boss列表
@@ -2573,10 +2756,49 @@ def main():
         return pygame.Rect(300 * scale, 30 * scale, 140 * scale, 120 * scale)
     elevator_rect = pygame.Rect(300, 30, 140, 120)
 
+    def setup_dynamic_content_for_map(current_map_level):
+        nonlocal zombies_for_current_map, safes_for_current_map, locked_doors_for_current_map
+        nonlocal key_item_for_current_map, player_has_key, dynamic_content_map_level
+        # 清理旧地图的门锁碰撞体
+        for ld in locked_doors_for_current_map:
+            if ld in obstacles:
+                obstacles.remove(ld)
+        safes_for_current_map = []
+        locked_doors_for_current_map = []
+        key_item_for_current_map = None
+        player_has_key = False
+        used = []
+
+        key_rect = pick_free_rect(obstacles, 24, 24, used_rects=used)
+        if key_rect:
+            used.append(key_rect.inflate(80, 80))
+            key_item_for_current_map = KeyItem(key_rect.centerx, key_rect.centery)
+
+        lock_rect = pick_free_rect(obstacles, 28, 120, used_rects=used)
+        if lock_rect:
+            used.append(lock_rect.inflate(100, 100))
+            lock = LockedDoor(lock_rect.x, lock_rect.y, lock_rect.width, lock_rect.height)
+            locked_doors_for_current_map.append(lock)
+            obstacles.append(lock)
+
+        safe_rect = pick_free_rect(obstacles, 56, 56, used_rects=used)
+        if safe_rect:
+            safes_for_current_map.append(
+                SafeBox(safe_rect.centerx, safe_rect.centery,
+                        reward_coins=25 + current_map_level * 5,
+                        reward_ammo=35 + current_map_level * 5)
+            )
+
+        zombie_count = 4 if current_map_level == 1 else (6 if 2 <= current_map_level <= 7 else 3)
+        zombies_for_current_map = generate_zombies_for_map(obstacles, zombie_image, count=zombie_count)
+        dynamic_content_map_level = current_map_level
+
     while running:
         current_time = pygame.time.get_ticks() # 获取当前时间
         # 根据当前世界尺寸更新电梯矩形（关卡1扩大时需缩放）
         elevator_rect = _elevator_rects()
+        if dynamic_content_map_level != map_level:
+            setup_dynamic_content_for_map(map_level)
         # 处理事件
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -3102,10 +3324,19 @@ def main():
                                 tutorial_step = 7
                                 print("教程：打开地图操作完成")
                     elif event.key == pygame.K_r: # 按下R键换弹
-                        if not player.reloading and player.current_bullets < player.max_clip_bullets and player.total_ammo > 0:
+                        if (not infinite_ammo and
+                            not player.reloading and
+                            player.current_bullets < player.max_clip_bullets and
+                            player.total_ammo > 0):
                             player.reloading = True
                             player.reload_start_time = current_time
                             player.reload_duration = player.current_weapon.reload_time
+                    elif event.key == pygame.K_l:  # 按 L 开启/关闭无限弹药
+                        infinite_ammo = not infinite_ammo
+                        if infinite_ammo:
+                            player.reloading = False
+                            player.current_bullets = player.max_clip_bullets
+                        print(f"无限弹药: {'开启' if infinite_ammo else '关闭'}")
                     elif is_shop_open and event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                         idx = event.key - pygame.K_1
                         items = [(50, "grenade", 3), (30, "medkit", 1), (40, "ammo", 30)]
@@ -3151,6 +3382,65 @@ def main():
                                     looting_start_time = current_time
                                     break
                             if looting_container is None:
+                                handled_special = False
+                                # 钥匙拾取
+                                if key_item_for_current_map and not key_item_for_current_map.collected:
+                                    d_key = math.sqrt(
+                                        (player_cx - key_item_for_current_map.rect.centerx) ** 2 +
+                                        (player_cy - key_item_for_current_map.rect.centery) ** 2
+                                    )
+                                    if d_key < 100:
+                                        key_item_for_current_map.collected = True
+                                        player_has_key = True
+                                        handled_special = True
+                                        print("已拾取钥匙，可开启门锁和保险箱")
+                                # 门锁交互
+                                if not handled_special and locked_doors_for_current_map:
+                                    nearest_lock = None
+                                    nearest_lock_dist = float('inf')
+                                    for lock in locked_doors_for_current_map:
+                                        if lock.is_open:
+                                            continue
+                                        dist_lock = math.sqrt(
+                                            (player_cx - lock.rect.centerx) ** 2 +
+                                            (player_cy - lock.rect.centery) ** 2
+                                        )
+                                        if dist_lock < nearest_lock_dist:
+                                            nearest_lock_dist = dist_lock
+                                            nearest_lock = lock
+                                    if nearest_lock and nearest_lock_dist < 100:
+                                        handled_special = True
+                                        if not player_has_key:
+                                            print("门锁需要钥匙")
+                                        else:
+                                            nearest_lock.is_open = True
+                                            if nearest_lock in obstacles:
+                                                obstacles.remove(nearest_lock)
+                                            print("已用钥匙打开门锁")
+                                # 保险箱交互
+                                if not handled_special and safes_for_current_map:
+                                    for safe in safes_for_current_map:
+                                        if safe.opened:
+                                            continue
+                                        dist_safe = math.sqrt(
+                                            (player_cx - safe.rect.centerx) ** 2 +
+                                            (player_cy - safe.rect.centery) ** 2
+                                        )
+                                        if dist_safe < 100:
+                                            handled_special = True
+                                            if not player_has_key:
+                                                print("保险箱需要钥匙")
+                                            else:
+                                                safe.opened = True
+                                                player.coins += safe.reward_coins
+                                                wn = player.current_weapon.name
+                                                player.weapon_ammo[wn] = player.weapon_ammo.get(wn, 0) + safe.reward_ammo
+                                                player.total_ammo = player.weapon_ammo[wn]
+                                                print(f"打开保险箱：金币 +{safe.reward_coins}，{wn}弹药 +{safe.reward_ammo}")
+                                            break
+
+                                if handled_special:
+                                    continue
                                 nearest_door = None
                                 nearest_dist = float('inf')
                                 for door in doors:
@@ -3667,7 +3957,10 @@ def main():
                     map_status = None
                 else:
                     # 更新玩家
-                    map_status = player.update(keys, world_width, world_height, current_time, obstacles, map_level, min_map_level)
+                    map_status = player.update(
+                        keys, world_width, world_height, current_time,
+                        obstacles, map_level, min_map_level, infinite_ammo
+                    )
                 # 电梯动画中：将玩家限制在电梯范围内
                 if elevator_animating:
                     er = elevator_rect
@@ -4273,6 +4566,15 @@ def main():
                         rx = cx + dx / world_range * radar_radius
                         ry = cy - dy / world_range * radar_radius
                         pygame.draw.circle(screen, (255, 100, 50), (int(rx), int(ry)), 8)
+                for zombie in zombies_for_current_map:
+                    dx = zombie.rect.centerx - player.rect.centerx
+                    dy = zombie.rect.centery - player.rect.centery
+                    dist = math.sqrt(dx*dx + dy*dy)
+                    if dist < world_range and dist > 0:
+                        nearby_count += 1
+                        rx = cx + dx / world_range * radar_radius
+                        ry = cy - dy / world_range * radar_radius
+                        pygame.draw.circle(screen, (120, 255, 120), (int(rx), int(ry)), 6)
                 if nearby_count > 0:
                     radar_font = get_chinese_font(22)
                     hint = radar_font.render("发现附近敌人  按 N 切回正常", True, (255, 220, 100))
@@ -4323,6 +4625,11 @@ def main():
                 # 绘制容器（箱子）
                 for c in containers_for_current_map:
                     c.draw(screen, camera_x, camera_y)
+                # 绘制钥匙/保险箱
+                if key_item_for_current_map:
+                    key_item_for_current_map.draw(screen, camera_x, camera_y)
+                for safe in safes_for_current_map:
+                    safe.draw(screen, camera_x, camera_y)
                 # 拾取进度条（正在拾取时）
                 if looting_container is not None:
                     elapsed = current_time - looting_start_time
@@ -4530,7 +4837,9 @@ def main():
                 if left_mouse_down:
                     # 使用当前枪械的射速
                     weapon_fire_rate = player.current_weapon.fire_rate
-                    if current_time - last_shot_time > weapon_fire_rate and player.current_bullets > 0 and not player.reloading:
+                    if (current_time - last_shot_time > weapon_fire_rate and
+                        (infinite_ammo or player.current_bullets > 0) and
+                        not player.reloading):
                         mouse_x, mouse_y = pygame.mouse.get_pos()
                         # 将屏幕坐标转换为世界坐标
                         target_world_x = mouse_x + camera_x
@@ -4545,7 +4854,10 @@ def main():
                         is_rpg = (player.current_weapon.name == "rpg")
                         new_bullet = Bullet(muzzle_x, muzzle_y, target_world_x, target_world_y, bullet_image, is_enemy_bullet=False, speed=weapon_bullet_speed, damage=weapon_damage, is_rpg_bullet=is_rpg, explosion_radius=150)
                         bullets.append(new_bullet)
-                        player.current_bullets -= 1 # 射击后减少子弹数量
+                        if not infinite_ammo:
+                            player.current_bullets -= 1 # 射击后减少子弹数量
+                        else:
+                            player.current_bullets = player.max_clip_bullets
 
                         last_shot_time = current_time
 
@@ -4674,6 +4986,47 @@ def main():
                                     bullets.remove(bullet)
                                 break
 
+                # 子弹与僵尸碰撞检测
+                for bullet in bullets[:]:
+                    for zombie in zombies_for_current_map[:]:
+                        if pygame.sprite.collide_rect(bullet, zombie):
+                            if bullet.is_rpg_bullet:
+                                apply_explosion_damage(
+                                    bullet.rect.centerx, bullet.rect.centery,
+                                    bullet.explosion_radius, bullet.damage,
+                                    enemies, boss_list, obstacles
+                                )
+                                trigger_screen_shake(10, 400)
+                                if bullet in bullets:
+                                    bullets.remove(bullet)
+                            else:
+                                zombie.health -= bullet.damage
+                                damage_numbers.append(
+                                    DamageNumber(zombie.rect.centerx, zombie.rect.top, int(bullet.damage), (120, 255, 120))
+                                )
+                                if zombie.health <= 0:
+                                    kill_count += 1
+                                    coin_reward = 3
+                                    player.coins += coin_reward
+                                    if current_time - last_kill_time < kill_streak_timeout:
+                                        kill_streak += 1
+                                    else:
+                                        kill_streak = 1
+                                    last_kill_time = current_time
+                                    if kill_streak >= 2:
+                                        streak_message, streak_message_color = get_streak_info(kill_streak)
+                                        streak_message_time = current_time
+                                    damage_numbers.append(
+                                        DamageNumber(zombie.rect.centerx, zombie.rect.top - 18, coin_reward, (255, 215, 0), is_crit=True)
+                                    )
+                                    corpses_for_current_map.append(
+                                        Corpse(zombie.rect.centerx, zombie.rect.centery, zombie.original_image, zombie.facing_angle)
+                                    )
+                                    zombies_for_current_map.remove(zombie)
+                                if bullet in bullets:
+                                    bullets.remove(bullet)
+                            break
+
                 # 先绘制尸体（在活着的敌人下方）
                 for corpse in corpses_for_current_map:
                     corpse.draw(screen, camera_x, camera_y)
@@ -4696,6 +5049,29 @@ def main():
                         hp_txt = hp_font.render(f"{int(enemy.health)}/{int(enemy.max_health)}", True, (255, 255, 255))
                         hp_rect = hp_txt.get_rect(midbottom=(ex + ew // 2, ey - 1))
                         screen.blit(hp_txt, hp_rect)
+
+                # 更新和绘制僵尸
+                for zombie in zombies_for_current_map:
+                    zombie.update(player, current_time, obstacles, enemies, boss_list)
+                    zombie.draw(screen, camera_x, camera_y)
+                    if show_enemy_health:
+                        zx = zombie.rect.x - camera_x
+                        zy = zombie.rect.y - camera_y - 12
+                        zw = zombie.rect.width
+                        hp_ratio = max(0, zombie.health / zombie.max_health)
+                        pygame.draw.rect(screen, (80, 0, 0), (zx, zy, zw, 5))
+                        pygame.draw.rect(screen, (80, 220, 80), (zx, zy, int(zw * hp_ratio), 5))
+                        pygame.draw.rect(screen, (200, 200, 200), (zx, zy, zw, 5), 1)
+
+                # 僵尸与敌人/Boss互殴后的死亡清理
+                for enemy in enemies[:]:
+                    if enemy.health <= 0:
+                        corpses_for_current_map.append(Corpse(enemy.rect.centerx, enemy.rect.centery, enemy.original_image, enemy.facing_angle))
+                        enemies.remove(enemy)
+                for boss in boss_list[:]:
+                    if boss.health <= 0:
+                        corpses_for_current_map.append(Corpse(boss.rect.centerx, boss.rect.centery, boss.original_image, boss.facing_angle))
+                        boss_list.remove(boss)
                 
                 # 更新和绘制Boss（使用和普通敌人一样的逻辑）
                 for boss in boss_list:
@@ -4725,6 +5101,21 @@ def main():
                         if bullet.rect.colliderect(obstacle.rect):
                             enemy_bullets.remove(bullet)
                             break
+                # 敌人子弹可误伤僵尸
+                for bullet in enemy_bullets[:]:
+                    hit_zombie = False
+                    for zombie in zombies_for_current_map[:]:
+                        if bullet.rect.colliderect(zombie.rect):
+                            zombie.health -= bullet.damage
+                            if zombie.health <= 0:
+                                corpses_for_current_map.append(
+                                    Corpse(zombie.rect.centerx, zombie.rect.centery, zombie.original_image, zombie.facing_angle)
+                                )
+                                zombies_for_current_map.remove(zombie)
+                            hit_zombie = True
+                            break
+                    if hit_zombie and bullet in enemy_bullets:
+                        enemy_bullets.remove(bullet)
 
                 # 玩家与敌人碰撞检测
                 for enemy in enemies[:]:
@@ -4770,6 +5161,9 @@ def main():
                 prompt_medkit = None
                 prompt_ammo_box = None
                 prompt_weapon_drop = None
+                prompt_key_item = None
+                prompt_safe = None
+                prompt_locked_door = None
                 if map_level == 1:
                     for m in medkits_for_current_map:
                         if m.used:
@@ -4811,6 +5205,27 @@ def main():
                     dy = player.rect.centery - c.rect.centery
                     if dx*dx + dy*dy < 100*100:
                         prompt_container = c
+                        break
+                if key_item_for_current_map and not key_item_for_current_map.collected:
+                    dx = player.rect.centerx - key_item_for_current_map.rect.centerx
+                    dy = player.rect.centery - key_item_for_current_map.rect.centery
+                    if dx * dx + dy * dy < 100 * 100:
+                        prompt_key_item = key_item_for_current_map
+                for safe in safes_for_current_map:
+                    if safe.opened:
+                        continue
+                    dx = player.rect.centerx - safe.rect.centerx
+                    dy = player.rect.centery - safe.rect.centery
+                    if dx * dx + dy * dy < 100 * 100:
+                        prompt_safe = safe
+                        break
+                for lock in locked_doors_for_current_map:
+                    if lock.is_open:
+                        continue
+                    dx = player.rect.centerx - lock.rect.centerx
+                    dy = player.rect.centery - lock.rect.centery
+                    if dx * dx + dy * dy < 100 * 100:
+                        prompt_locked_door = lock
                         break
 
                 # 敌人子弹与玩家碰撞检测
@@ -4872,7 +5287,8 @@ def main():
                 weapon_text = bullet_font.render(f"枪械: {player.current_weapon.name}", True, (255, 255, 0))  # 黄色显示枪械名称
                 screen.blit(weapon_text, (10, 10)) # 左上角显示
                 
-                bullet_text = bullet_font.render(f"弹药: {player.current_bullets}/{player.total_ammo}", True, (255, 255, 255))
+                ammo_total_text = "∞" if infinite_ammo else str(player.total_ammo)
+                bullet_text = bullet_font.render(f"弹药: {player.current_bullets}/{ammo_total_text}", True, (255, 255, 255))
                 screen.blit(bullet_text, (10, 40)) # 在枪械名称下方显示
                 
                 # 绘制当前地图信息
@@ -4894,6 +5310,8 @@ def main():
                 else:
                     dodge_text = map_font.render("[Q]翻滚 就绪", True, (100, 255, 100))
                 screen.blit(dodge_text, (10, 160))
+                key_text = map_font.render(f"钥匙: {'已获得' if player_has_key else '未获得'}", True, (255, 230, 120))
+                screen.blit(key_text, (10, 190))
                 
                 # === 连杀提示（屏幕中央大字） ===
                 if streak_message and current_time - streak_message_time < 2000:
@@ -5101,6 +5519,17 @@ def main():
                 if prompt_container:
                     draw_hint_above(screen, prompt_container.rect.centerx, prompt_container.rect.centery,
                                     "按 E 拾取 (3秒)", (200, 255, 150), camera_x, camera_y, -40)
+                if prompt_key_item:
+                    draw_hint_above(screen, prompt_key_item.rect.centerx, prompt_key_item.rect.top,
+                                    "按 E 拾取钥匙", (255, 230, 120), camera_x, camera_y, -30)
+                if prompt_safe:
+                    safe_hint = "按 E 打开保险箱" if player_has_key else "需要钥匙才能开保险箱"
+                    draw_hint_above(screen, prompt_safe.rect.centerx, prompt_safe.rect.top,
+                                    safe_hint, (170, 230, 230), camera_x, camera_y, -30)
+                if prompt_locked_door:
+                    lock_hint = "按 E 开启门锁" if player_has_key else "门锁需要钥匙"
+                    draw_hint_above(screen, prompt_locked_door.rect.centerx, prompt_locked_door.rect.top,
+                                    lock_hint, (255, 215, 120), camera_x, camera_y, -30)
                 if prompt_medkit:
                     draw_hint_above(screen, prompt_medkit.rect.centerx, prompt_medkit.rect.top,
                                     "按 E 键使用医疗包", (255, 255, 255), camera_x, camera_y, -30)
