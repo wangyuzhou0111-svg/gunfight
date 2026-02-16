@@ -732,6 +732,8 @@ def main():
         def update(self, keys, world_width, world_height, current_time, obstacles, map_level=None, min_map_level=None, infinite_ammo=False):
             # 记录当前位置，用于判断是否移动
             old_x, old_y = self.rect.x, self.rect.y
+            # 给障碍碰撞一个微小收缩，避免“看起来有缝但过不去”的边缘卡住
+            collision_shrink = 8
 
             # Movement logic
             current_speed = self.sprint_speed if self.is_sprinting else self.speed
@@ -746,11 +748,12 @@ def main():
             self.rect.x += dx
             # Check collision with obstacles in X
             for obstacle in obstacles:
-                if self.rect.colliderect(obstacle.rect):
+                test_rect = obstacle.rect.inflate(-collision_shrink, -collision_shrink)
+                if self.rect.colliderect(test_rect):
                     if dx > 0: # Moving right
-                        self.rect.right = obstacle.rect.left
+                        self.rect.right = test_rect.left
                     if dx < 0: # Moving left
-                        self.rect.left = obstacle.rect.right
+                        self.rect.left = test_rect.right
 
             # Move Y
             dy = 0
@@ -762,11 +765,12 @@ def main():
             self.rect.y += dy
             # Check collision with obstacles in Y
             for obstacle in obstacles:
-                if self.rect.colliderect(obstacle.rect):
+                test_rect = obstacle.rect.inflate(-collision_shrink, -collision_shrink)
+                if self.rect.colliderect(test_rect):
                     if dy > 0: # Moving down
-                        self.rect.bottom = obstacle.rect.top
+                        self.rect.bottom = test_rect.top
                     if dy < 0: # Moving up
-                        self.rect.top = obstacle.rect.bottom
+                        self.rect.top = test_rect.bottom
             
             # Boundary checks
             self.rect.x = max(0, min(self.rect.x, world_width - self.rect.width))
@@ -5139,17 +5143,20 @@ def main():
                     if elapsed >= dodge_roll_duration:
                         dodge_rolling = False
                     else:
+                        collision_shrink = 8
                         # 翻滚移动
                         move_x = dodge_roll_dx * dodge_roll_speed
                         move_y = dodge_roll_dy * dodge_roll_speed
                         player.rect.x += int(move_x)
                         for obstacle in obstacles:
-                            if player.rect.colliderect(obstacle.rect):
+                            test_rect = obstacle.rect.inflate(-collision_shrink, -collision_shrink)
+                            if player.rect.colliderect(test_rect):
                                 player.rect.x -= int(move_x)
                                 break
                         player.rect.y += int(move_y)
                         for obstacle in obstacles:
-                            if player.rect.colliderect(obstacle.rect):
+                            test_rect = obstacle.rect.inflate(-collision_shrink, -collision_shrink)
+                            if player.rect.colliderect(test_rect):
                                 player.rect.y -= int(move_y)
                                 break
                         # 翻滚期间玩家半透明效果（通过不受伤实现无敌）
