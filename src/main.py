@@ -281,6 +281,8 @@ def main():
     
     # 伤害飘字列表
     damage_numbers = []  # [(x, y, damage, creation_time, color, is_crit)]
+    muzzle_flashes = []  # 枪口火焰特效
+    hit_flashes = []  # 命中白闪特效
     
     # 屏幕震动
     screen_shake_intensity = 0   # 震动强度
@@ -307,6 +309,10 @@ def main():
     show_enemy_health = False  # 按7切换
     left_mouse_down = False # 新增：跟踪鼠标左键是否按下
     infinite_ammo = False  # 按L切换无限弹药
+    zombie_wave_interval_ms = 25000  # 僵尸波次刷新间隔
+    next_zombie_wave_time = 0
+    zombie_wave_notice_time = 0
+    zombie_wave_notice = ""
 
     # 定义 Obstacle 类
     class Obstacle(pygame.sprite.Sprite):
@@ -769,6 +775,9 @@ def main():
             
             # Boundary checks
             self.rect.x = max(0, min(self.rect.x, world_width - self.rect.width))
+            if map_level is not None and map_level < 1:
+                self.rect.y = max(0, min(self.rect.y, world_height - self.rect.height))
+                return None
             
             # Check if player goes beyond the top boundary
             if self.rect.y < 0:
@@ -1550,6 +1559,37 @@ def main():
             if not self.is_open:
                 surface.blit(self.image, (self.rect.x - camera_x, self.rect.y - camera_y))
 
+    class ExperimentReport(pygame.sprite.Sprite):
+        def __init__(self, x, y, report_id, title, lines):
+            super().__init__()
+            self.rect = pygame.Rect(x - 20, y - 14, 40, 28)
+            self.report_id = report_id
+            self.title = title
+            self.lines = lines
+
+        def draw(self, surface, camera_x, camera_y, viewed=False):
+            sx = self.rect.x - camera_x
+            sy = self.rect.y - camera_y
+            base = (170, 220, 180) if viewed else (220, 220, 210)
+            border = (110, 180, 120) if viewed else (110, 110, 100)
+            pygame.draw.rect(surface, base, (sx, sy, self.rect.width, self.rect.height))
+            pygame.draw.rect(surface, border, (sx, sy, self.rect.width, self.rect.height), 2)
+            pygame.draw.line(surface, (130, 130, 120), (sx + 6, sy + 9), (sx + self.rect.width - 6, sy + 9), 1)
+            pygame.draw.line(surface, (130, 130, 120), (sx + 6, sy + 15), (sx + self.rect.width - 6, sy + 15), 1)
+
+    class BasementEntry(pygame.sprite.Sprite):
+        def __init__(self, x, y):
+            super().__init__()
+            self.rect = pygame.Rect(x - 32, y - 32, 64, 64)
+
+        def draw(self, surface, camera_x, camera_y):
+            sx = self.rect.x - camera_x
+            sy = self.rect.y - camera_y
+            pygame.draw.rect(surface, (40, 40, 45), (sx, sy, self.rect.width, self.rect.height))
+            pygame.draw.rect(surface, (120, 190, 220), (sx, sy, self.rect.width, self.rect.height), 2)
+            pygame.draw.line(surface, (120, 190, 220), (sx + 12, sy + 16), (sx + 32, sy + 44), 3)
+            pygame.draw.line(surface, (120, 190, 220), (sx + 52, sy + 16), (sx + 32, sy + 44), 3)
+
     class Zombie(pygame.sprite.Sprite):
         def __init__(self, x, y, image):
             super().__init__()
@@ -1631,6 +1671,15 @@ def main():
             rotated = pygame.transform.rotate(self.original_image, self.facing_angle)
             rr = rotated.get_rect(center=(self.rect.centerx - camera_x, self.rect.centery - camera_y))
             surface.blit(rotated, rr)
+
+    class MutantZombie(Zombie):
+        def __init__(self, x, y, image):
+            super().__init__(x, y, image)
+            self.speed = 2.2
+            self.health = 260
+            self.max_health = 260
+            self.damage = 28
+            self.attack_cooldown = 650
     
     # === 手雷类 ===
     class Grenade(pygame.sprite.Sprite):
@@ -1932,6 +1981,27 @@ def main():
             obstacles.append(Obstacle_class(cx - 25, cy + 200, wall, 200))
             return obstacles, roads, doors
 
+        if map_level == -1:
+            # ========== 地图-1：地下层 ==========
+            wall = 50
+            build_top, build_left = 0, 0
+            build_width = world_width
+            build_height = world_height - 400
+            build_bottom = build_top + build_height
+            obstacles.append(Obstacle_class(build_left, build_top, build_width, wall))
+            obstacles.append(Obstacle_class(build_left, build_top + wall, wall, build_height - wall))
+            obstacles.append(Obstacle_class(build_left + build_width - wall, build_top + wall, wall, build_height - wall))
+            obstacles.append(Obstacle_class(build_left, build_bottom - wall, build_width, wall))
+            # 地下层掩体
+            cx, cy = build_width // 2, build_height // 2
+            obstacles.append(Obstacle_class(cx - 420, cy - 220, 160, wall))
+            obstacles.append(Obstacle_class(cx + 260, cy - 220, 160, wall))
+            obstacles.append(Obstacle_class(cx - 420, cy + 220, 160, wall))
+            obstacles.append(Obstacle_class(cx + 260, cy + 220, 160, wall))
+            obstacles.append(Obstacle_class(cx - 30, cy - 360, wall, 180))
+            obstacles.append(Obstacle_class(cx - 30, cy + 180, wall, 180))
+            return obstacles, roads, doors
+
         if map_level != 1:
             return obstacles, roads, doors
         # ========== 地图1：参考布局（仅布局不还原细节）==========
@@ -2217,6 +2287,57 @@ def main():
                 continue
             return rect
         return None
+
+    def spawn_zombie_wave(obstacles_list, extra_count=3):
+        spawned = []
+        margin = 120
+        edge_points = []
+        for _ in range(extra_count * 4):
+            side = random.choice(["top", "bottom", "left", "right"])
+            if side == "top":
+                x = random.randint(margin, world_width - margin)
+                y = random.randint(margin, margin + 220)
+            elif side == "bottom":
+                x = random.randint(margin, world_width - margin)
+                y = random.randint(world_height - 650, world_height - 450)
+            elif side == "left":
+                x = random.randint(margin, margin + 260)
+                y = random.randint(margin, world_height - 450)
+            else:
+                x = random.randint(world_width - 320, world_width - margin)
+                y = random.randint(margin, world_height - 450)
+            edge_points.append((x, y))
+        for x, y in edge_points:
+            zr = zombie_image.get_rect(center=(x, y))
+            if zr.colliderect(player.rect.inflate(280, 280)):
+                continue
+            if any(zr.colliderect(o.rect) for o in obstacles_list):
+                continue
+            spawned.append(Zombie(x, y, zombie_image))
+            if len(spawned) >= extra_count:
+                break
+        return spawned
+
+    def spawn_mutant_pack(obstacles_list, count=3, around_x=None, around_y=None):
+        out = []
+        if around_x is None:
+            around_x = world_width // 2
+        if around_y is None:
+            around_y = world_height // 2
+        for _ in range(count * 6):
+            if len(out) >= count:
+                break
+            x = around_x + random.randint(-260, 260)
+            y = around_y + random.randint(-180, 180)
+            x = max(100, min(world_width - 100, x))
+            y = max(100, min(world_height - 500, y))
+            zr = zombie_image.get_rect(center=(x, y))
+            if zr.colliderect(player.rect.inflate(260, 260)):
+                continue
+            if any(zr.colliderect(o.rect) for o in obstacles_list):
+                continue
+            out.append(MutantZombie(x, y, zombie_image))
+        return out
     
     def generate_medkits_for_stage1(player_pos, enemies_list, obstacles_list, count=3):
         """为关卡1生成医疗包；当前已清空，不生成任何物品"""
@@ -2691,6 +2812,23 @@ def main():
     safes_for_current_map = []  # 当前地图保险箱
     locked_doors_for_current_map = []  # 当前地图钥匙门
     key_item_for_current_map = None  # 当前地图钥匙
+    experiment_reports_for_map = []  # 二层实验报告（3份）
+    report_viewed_ids = set()  # 已查看情报ID，按T不重复传送
+    report_current_id = None  # 当前打开的情报ID
+    report_unlocked = False  # 是否已解锁可按Q查看
+    report_panel_open = False  # 报告面板是否打开
+    basement_unlocked = False  # 是否已解锁地下一层入口
+    basement_entry_for_map = None  # 一层/地下层出入口
+    mutant_zombies_for_current_map = []  # 当前地图突变僵尸
+    mutant_hunt_active = False  # 突变僵尸追击是否激活
+    mutant_alive_count = 0  # 剩余突变僵尸数量
+    basement_story_playing = False  # -1层剧情动画播放中
+    basement_story_done = False  # -1层剧情动画是否已完成
+    basement_story_start_time = 0
+    roof_objective_active = False  # 是否激活“返回1层到天台”目标
+    helicopter_anim_playing = False
+    helicopter_anim_start_time = 0
+    player_victory = False
     player_has_key = False
     dynamic_content_map_level = None
     corpses_for_current_map = []  # 当前地图上的尸体（敌人/Boss 死后留下）
@@ -2747,7 +2885,7 @@ def main():
 
     # 楼层名称
     FLOOR_NAMES = {1: "1F 大厅", 2: "2F 实验室", 3: "3F 服务器房", 4: "4F 办公区",
-                   5: "5F 研发部", 6: "6F 管理层", 7: "7F 实验区", 8: "8F 天台"}
+                   5: "5F 研发部", 6: "6F 管理层", 7: "7F 实验区", 8: "8F 天台", -1: "B1 地下层"}
 
     # 所有楼层共用一个电梯位置（世界坐标）
     def _elevator_rects():
@@ -2758,6 +2896,12 @@ def main():
     def setup_dynamic_content_for_map(current_map_level):
         nonlocal zombies_for_current_map, safes_for_current_map, locked_doors_for_current_map
         nonlocal key_item_for_current_map, player_has_key, dynamic_content_map_level
+        nonlocal next_zombie_wave_time, zombie_wave_notice_time, zombie_wave_notice
+        nonlocal muzzle_flashes, hit_flashes
+        nonlocal experiment_reports_for_map, report_viewed_ids, report_current_id
+        nonlocal report_unlocked, report_panel_open
+        nonlocal basement_unlocked, basement_entry_for_map
+        nonlocal mutant_zombies_for_current_map, mutant_hunt_active, mutant_alive_count
         # 清理旧地图的门锁碰撞体
         for ld in locked_doors_for_current_map:
             if ld in obstacles:
@@ -2787,10 +2931,155 @@ def main():
                         reward_coins=25 + current_map_level * 5,
                         reward_ammo=35 + current_map_level * 5)
             )
+        # 二层专属：实验报告（3份）
+        experiment_reports_for_map = []
+        report_current_id = None
+        report_unlocked = (len(report_viewed_ids) >= 1)
+        report_panel_open = False
+        basement_entry_for_map = None
+        report_defs = [
+            (
+                1,
+                "实验报告 A-17：感知特征",
+                [
+                    "1. 样本对枪声、爆炸声表现出明显聚集反应。",
+                    "2. 嗅觉追踪在密闭走廊中效率提升约 40%。",
+                    "3. 建议：交火后立即换位，避免被声源包围。"
+                ]
+            ),
+            (
+                2,
+                "实验报告 B-09：组织弱点",
+                [
+                    "1. 头颈部组织受损后，扑击与转向速度显著下降。",
+                    "2. 肢体损伤不会立刻失去行动能力。",
+                    "3. 建议：优先高爆发点射关键部位。"
+                ]
+            ),
+            (
+                3,
+                "实验报告 C-31：群体行为",
+                [
+                    "1. 样本出现周期性群体增援，间隔趋于稳定。",
+                    "2. 狭窄通道中会形成堵塞冲击。",
+                    "3. 建议：利用门锁与掩体拉开距离逐批清理。"
+                ]
+            ),
+        ]
+        if current_map_level == 2:
+            for rid, title, lines in report_defs:
+                report_rect = pick_free_rect(obstacles, 40, 28, used_rects=used)
+                if report_rect:
+                    rx, ry = report_rect.centerx, report_rect.centery
+                    used.append(report_rect.inflate(100, 100))
+                else:
+                    rx = world_width // 2 + (rid - 2) * 150
+                    ry = world_height // 2 + (rid - 2) * 90
+                experiment_reports_for_map.append(ExperimentReport(rx, ry, rid, title, lines))
+        if current_map_level == 1 and basement_unlocked:
+            basement_entry_for_map = BasementEntry(elevator_rect.centerx + 180, elevator_rect.centery + 20)
+        if current_map_level == -1:
+            basement_entry_for_map = BasementEntry(world_width // 2, world_height - 520)
 
         zombie_count = 4 if current_map_level == 1 else (6 if 2 <= current_map_level <= 7 else 3)
         zombies_for_current_map = generate_zombies_for_map(obstacles, zombie_image, count=zombie_count)
+        mutant_zombies_for_current_map = []
+        if mutant_hunt_active and mutant_alive_count > 0 and current_map_level <= 8:
+            mutant_zombies_for_current_map = spawn_mutant_pack(
+                obstacles, count=mutant_alive_count,
+                around_x=player.rect.centerx, around_y=player.rect.centery
+            )
+        next_zombie_wave_time = pygame.time.get_ticks() + zombie_wave_interval_ms
+        zombie_wave_notice_time = 0
+        zombie_wave_notice = ""
+        muzzle_flashes = []
+        hit_flashes = []
         dynamic_content_map_level = current_map_level
+
+    def switch_map_quick(target_map_level, spawn_tag="default"):
+        nonlocal map_level, obstacles, roads, doors, enemies, boss_list
+        nonlocal medkits_for_current_map, ammo_boxes_for_current_map
+        nonlocal weapon_drops_for_current_map, containers_for_current_map, corpses_for_current_map
+        nonlocal camera_x, camera_y
+        nonlocal basement_story_playing, basement_story_start_time, basement_story_done
+        # 保存当前地图
+        maps_data[map_level] = {
+            'obstacles': [(o.rect.x, o.rect.y, o.rect.width, o.rect.height) for o in obstacles if not isinstance(o, Door)],
+            'roads': [(r.x, r.y, r.width, r.height) for r in roads],
+            'enemies': [(e.rect.x, e.rect.y, e.health) for e in enemies],
+            'doors': [(d.x, d.y, d.width, d.height, d.is_open, d.hinge) for d in doors]
+        }
+        map_level = target_map_level
+        if map_level in maps_data:
+            obstacles = [Obstacle(x, y, w, h) for x, y, w, h in maps_data[map_level]['obstacles']]
+            roads = [pygame.Rect(x, y, w, h) for x, y, w, h in maps_data[map_level]['roads']]
+            if 'doors' in maps_data[map_level]:
+                doors = [Door(x, y, w, h, hinge=hg) for x, y, w, h, is_open, hg in maps_data[map_level]['doors']]
+                for i, (_x, _y, _w, _h, is_open, _hg) in enumerate(maps_data[map_level]['doors']):
+                    if is_open:
+                        doors[i].toggle()
+                rebuild_door_pairs(doors)
+                for door in doors:
+                    if not door.is_open:
+                        obstacles.append(door)
+            else:
+                doors = []
+            enemies = []
+            for enemy_info in maps_data[map_level].get('enemies', []):
+                if len(enemy_info) == 3:
+                    x, y, health = enemy_info
+                    if health == 250:
+                        enemies.append(Enemy(x, y, elite_enemy_image, health=250, drop_weapon=get_random_elite_weapon()))
+                    else:
+                        enemies.append(Enemy(x, y, enemy_image, health=100))
+        else:
+            random.seed(42 + map_level)
+            obstacles, roads, doors = generate_map(world_width, world_height, player.rect, Obstacle, map_level)
+            for door in doors:
+                if not door.is_open:
+                    obstacles.append(door)
+            enemies = generate_enemies_for_map(obstacles, player.rect, enemy_image, map_level)
+            elite_enemies = generate_elite_enemies_for_map(obstacles, player.rect, elite_enemy_image, count=4, current_map_level=map_level)
+            enemies.extend(elite_enemies)
+            maps_data[map_level] = {
+                'obstacles': [(o.rect.x, o.rect.y, o.rect.width, o.rect.height) for o in obstacles if not isinstance(o, Door)],
+                'roads': [(r.x, r.y, r.width, r.height) for r in roads],
+                'enemies': [(e.rect.x, e.rect.y, e.health) for e in enemies],
+                'doors': [(d.x, d.y, d.width, d.height, d.is_open, d.hinge) for d in doors]
+            }
+        # 地下层不生成Boss
+        boss_list.clear()
+        # 重置拾取物（地下层可不生成医疗/弹药）
+        weapon_drops_for_current_map.clear()
+        corpses_for_current_map.clear()
+        medkits_for_current_map.clear()
+        ammo_boxes_for_current_map.clear()
+        containers_for_current_map.clear()
+        if map_level >= 1:
+            for _x, _y in generate_container_positions(obstacles, world_width, world_height, 6):
+                containers_for_current_map.append(Container(_x, _y))
+            for x, y in generate_ammo_boxes(obstacles, count=4):
+                ammo_boxes_for_current_map.append(AmmoBox(x, y, ammo_box_image))
+        # 出生点
+        if map_level == -1:
+            player.rect.centerx = world_width // 2
+            player.rect.centery = world_height - 560
+            if not basement_story_done and spawn_tag == "to_basement":
+                basement_story_playing = True
+                basement_story_start_time = pygame.time.get_ticks()
+        elif map_level == 1 and spawn_tag == "from_basement":
+            player.rect.centerx = world_width // 2
+            player.rect.centery = 220
+        else:
+            player.rect.centerx = world_width // 2
+            player.rect.centery = world_height // 2
+        player.rect.x = max(0, min(player.rect.x, world_width - player.rect.width))
+        player.rect.y = max(0, min(player.rect.y, world_height - player.rect.height))
+        setup_dynamic_content_for_map(map_level)
+        camera_x = player.rect.x - screen_width // 2
+        camera_y = player.rect.y - screen_height // 2
+        camera_x = max(0, min(camera_x, world_width - screen_width))
+        camera_y = max(0, min(camera_y, world_height - screen_height))
 
     while running:
         current_time = pygame.time.get_ticks() # 获取当前时间
@@ -3322,6 +3611,35 @@ def main():
                                 tutorial_completed['map'] = True
                                 tutorial_step = 7
                                 print("教程：打开地图操作完成")
+                    elif event.key == pygame.K_u:  # 按 U 传送到电梯
+                        if current_stage == 1 and 1 <= map_level <= 8:
+                            player.rect.centerx = elevator_rect.centerx
+                            player.rect.centery = elevator_rect.centery + elevator_rect.height
+                            player.rect.x = max(0, min(player.rect.x, world_width - player.rect.width))
+                            player.rect.y = max(0, min(player.rect.y, world_height - player.rect.height))
+                            camera_x = player.rect.x - screen_width // 2
+                            camera_y = player.rect.y - screen_height // 2
+                            camera_x = max(0, min(camera_x, world_width - screen_width))
+                            camera_y = max(0, min(camera_y, world_height - screen_height))
+                            print("已传送到电梯")
+                    elif event.key == pygame.K_t:  # 按 T 传送到实验报告旁
+                        unviewed_reports = [r for r in experiment_reports_for_map if r.report_id not in report_viewed_ids]
+                        if unviewed_reports:
+                            nearest = min(
+                                unviewed_reports,
+                                key=lambda r: (player.rect.centerx - r.rect.centerx) ** 2 + (player.rect.centery - r.rect.centery) ** 2
+                            )
+                            player.rect.centerx = nearest.rect.centerx + 60
+                            player.rect.centery = nearest.rect.centery
+                            player.rect.x = max(0, min(player.rect.x, world_width - player.rect.width))
+                            player.rect.y = max(0, min(player.rect.y, world_height - player.rect.height))
+                            camera_x = player.rect.x - screen_width // 2
+                            camera_y = player.rect.y - screen_height // 2
+                            camera_x = max(0, min(camera_x, world_width - screen_width))
+                            camera_y = max(0, min(camera_y, world_height - screen_height))
+                            print(f"已传送到最近未查看情报 #{nearest.report_id}")
+                        elif experiment_reports_for_map:
+                            print("三份情报已全部查看")
                     elif event.key == pygame.K_r: # 按下R键换弹
                         if (not infinite_ammo and
                             not player.reloading and
@@ -3336,6 +3654,14 @@ def main():
                             player.reloading = False
                             player.current_bullets = player.max_clip_bullets
                         print(f"无限弹药: {'开启' if infinite_ammo else '关闭'}")
+                    elif event.key == pygame.K_k:  # 三份情报完成后解锁一层地下入口
+                        if len(report_viewed_ids) >= 3:
+                            basement_unlocked = True
+                            if map_level == 1:
+                                setup_dynamic_content_for_map(map_level)
+                            print("已获得一层地下入口情报：前往标记点按 E 进入 -1 层")
+                        else:
+                            print(f"情报未收齐：当前 {len(report_viewed_ids)}/3")
                     elif is_shop_open and event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                         idx = event.key - pygame.K_1
                         items = [(50, "grenade", 3), (30, "medkit", 1), (40, "ammo", 30)]
@@ -3366,6 +3692,21 @@ def main():
                     elif event.key == pygame.K_e: # 按下E键开/关门 或 乘电梯
                         player_cx = player.rect.centerx
                         player_cy = player.rect.centery
+                        # 一层<->地下层入口
+                        if basement_entry_for_map is not None:
+                            d_b = math.sqrt(
+                                (player_cx - basement_entry_for_map.rect.centerx) ** 2 +
+                                (player_cy - basement_entry_for_map.rect.centery) ** 2
+                            )
+                            if d_b < 110:
+                                if map_level == 1 and basement_unlocked:
+                                    switch_map_quick(-1, "to_basement")
+                                    print("已进入 -1 层")
+                                    continue
+                                if map_level == -1:
+                                    switch_map_quick(1, "from_basement")
+                                    print("已返回 1 层")
+                                    continue
                         # 任何楼层：站在电梯上按E打开楼层选择UI
                         if current_stage == 1 and 1 <= map_level <= 8 and player.rect.colliderect(elevator_rect) and not elevator_ui_open:
                             elevator_ui_open = True
@@ -3382,6 +3723,23 @@ def main():
                                     break
                             if looting_container is None:
                                 handled_special = False
+                                # 二层实验报告：靠近按 E 查看丧尸实验情报
+                                if map_level == 2 and experiment_reports_for_map:
+                                    nearest_report = min(
+                                        experiment_reports_for_map,
+                                        key=lambda r: (player_cx - r.rect.centerx) ** 2 + (player_cy - r.rect.centery) ** 2
+                                    )
+                                    dist_report = math.sqrt(
+                                        (player_cx - nearest_report.rect.centerx) ** 2 +
+                                        (player_cy - nearest_report.rect.centery) ** 2
+                                    )
+                                    if dist_report < 100:
+                                        handled_special = True
+                                        report_unlocked = True
+                                        report_current_id = nearest_report.report_id
+                                        report_viewed_ids.add(nearest_report.report_id)
+                                        report_panel_open = True
+                                        print(f"已查看情报 #{nearest_report.report_id}：按 Q 可再次查看")
                                 # 钥匙拾取
                                 if key_item_for_current_map and not key_item_for_current_map.collected:
                                     d_key = math.sqrt(
@@ -3550,7 +3908,11 @@ def main():
                             last_grenade_time = current_time
                             print(f"投掷手雷！剩余: {player.grenades}")
                     elif event.key == pygame.K_q:  # 按 Q 闪避翻滚
-                        if not dodge_rolling and current_time - last_dodge_roll_time > dodge_roll_cooldown and player.stamina >= 20:
+                        if report_unlocked and not is_map_open and not radar_on and not is_shop_open and not elevator_ui_open:
+                            if report_current_id is None and report_viewed_ids:
+                                report_current_id = min(report_viewed_ids)
+                            report_panel_open = not report_panel_open
+                        elif not dodge_rolling and current_time - last_dodge_roll_time > dodge_roll_cooldown and player.stamina >= 20:
                             keys_state = pygame.key.get_pressed()
                             # 根据当前按键方向确定翻滚方向
                             dx, dy = 0, 0
@@ -3891,6 +4253,75 @@ def main():
                 pygame.display.flip()
                 clock.tick(60)
                 continue
+            # 地下层剧情：远处破洞，3只突变僵尸冲出
+            if basement_story_playing:
+                screen.fill((8, 8, 10))
+                elapsed_bs = current_time - basement_story_start_time
+                cave_x = screen_width // 2
+                cave_y = screen_height // 3
+                cave_w = 240
+                cave_h = 110
+                pygame.draw.ellipse(screen, (25, 20, 20), (cave_x - cave_w // 2, cave_y - cave_h // 2, cave_w, cave_h))
+                pygame.draw.ellipse(screen, (90, 50, 50), (cave_x - cave_w // 2, cave_y - cave_h // 2, cave_w, cave_h), 3)
+                if elapsed_bs > 800:
+                    shock = min(1.0, (elapsed_bs - 800) / 1800.0)
+                    for i in range(3):
+                        zx = cave_x - 80 + i * 80
+                        zy = cave_y + 10 + int(260 * shock)
+                        pygame.draw.circle(screen, (110, 210, 110), (zx, zy), 24)
+                        pygame.draw.circle(screen, (50, 110, 50), (zx, zy), 24, 2)
+                title_font = get_chinese_font(34)
+                txt_font = get_chinese_font(24)
+                title = title_font.render("地下层异响！墙体破裂！", True, (240, 180, 180))
+                screen.blit(title, title.get_rect(center=(screen_width // 2, 70)))
+                line = txt_font.render("3只突变僵尸冲出洞口，立即撤回1层并前往天台！", True, (230, 230, 230))
+                screen.blit(line, line.get_rect(center=(screen_width // 2, screen_height - 90)))
+                if elapsed_bs >= 3600:
+                    basement_story_playing = False
+                    basement_story_done = True
+                    mutant_hunt_active = True
+                    mutant_alive_count = max(mutant_alive_count, 3)
+                    roof_objective_active = True
+                    setup_dynamic_content_for_map(map_level)
+                pygame.display.flip()
+                clock.tick(60)
+                continue
+            # 天台直升机撤离动画
+            if helicopter_anim_playing:
+                screen.fill((10, 18, 28))
+                elapsed_h = current_time - helicopter_anim_start_time
+                heli_progress = min(1.0, elapsed_h / 4500.0)
+                hx = int(screen_width + 220 - (screen_width + 460) * heli_progress)
+                hy = 130 + int(math.sin(elapsed_h / 120.0) * 6)
+                pygame.draw.rect(screen, (130, 130, 140), (hx, hy, 180, 48))
+                pygame.draw.rect(screen, (95, 95, 105), (hx + 28, hy - 12, 120, 12))
+                pygame.draw.line(screen, (180, 180, 190), (hx - 40, hy - 6), (hx + 220, hy - 6), 3)
+                pygame.draw.line(screen, (180, 180, 190), (hx + 30, hy + 54), (hx + 150, hy + 54), 3)
+                cap_font = get_chinese_font(34)
+                cap = cap_font.render("直升机抵达，准备撤离！", True, (210, 230, 255))
+                screen.blit(cap, cap.get_rect(center=(screen_width // 2, 70)))
+                tip_font = get_chinese_font(22)
+                tip = tip_font.render("坚持住，突变体正在追来...", True, (230, 210, 210))
+                screen.blit(tip, tip.get_rect(center=(screen_width // 2, screen_height - 60)))
+                if elapsed_h >= 5000:
+                    helicopter_anim_playing = False
+                    player_victory = True
+                pygame.display.flip()
+                clock.tick(60)
+                continue
+            if player_victory:
+                screen.fill((6, 14, 20))
+                vf = get_chinese_font(64)
+                sf = get_chinese_font(28)
+                t1 = vf.render("任务完成", True, (120, 255, 170))
+                t2 = sf.render("你成功引开突变体并撤离，行动胜利。", True, (220, 220, 220))
+                t3 = sf.render("按 ESC 或关闭窗口退出", True, (180, 180, 180))
+                screen.blit(t1, t1.get_rect(center=(screen_width // 2, screen_height // 2 - 60)))
+                screen.blit(t2, t2.get_rect(center=(screen_width // 2, screen_height // 2 + 10)))
+                screen.blit(t3, t3.get_rect(center=(screen_width // 2, screen_height // 2 + 60)))
+                pygame.display.flip()
+                clock.tick(60)
+                continue
             # 如果暂停，只绘制暂停菜单，不更新游戏逻辑
             if is_paused:
                 # 绘制灰色背景
@@ -3956,7 +4387,7 @@ def main():
                 keys = pygame.key.get_pressed()
 
                 # 电梯UI打开时冻结玩家和游戏逻辑
-                if elevator_ui_open:
+                if elevator_ui_open or report_panel_open:
                     map_status = None
                 else:
                     # 更新玩家
@@ -4064,6 +4495,20 @@ def main():
                             player.total_ammo = player.weapon_ammo[wn]
                             print(f"从容器获得 {add} 发{wn}弹药，当前总弹药: {player.total_ammo}")
                         looting_container = None
+
+                # 僵尸波次：周期刷新，增强持续战斗压力
+                if not elevator_ui_open and not elevator_animating and current_time >= next_zombie_wave_time:
+                    extra = 2 if map_level == 1 else (4 if 2 <= map_level <= 7 else 3)
+                    new_wave = spawn_zombie_wave(obstacles, extra_count=extra)
+                    if new_wave:
+                        zombies_for_current_map.extend(new_wave)
+                        zombie_wave_notice = f"僵尸增援 +{len(new_wave)}"
+                        zombie_wave_notice_time = current_time
+                    next_zombie_wave_time = current_time + zombie_wave_interval_ms
+                # 目标推进：回到天台触发直升机撤离动画
+                if roof_objective_active and map_level == 8 and not helicopter_anim_playing and not player_victory:
+                    helicopter_anim_playing = True
+                    helicopter_anim_start_time = current_time
 
                 # 统一电梯系统：从楼层选择UI启动，动画结束后切换楼层
                 if request_elevator_go and not elevator_animating:
@@ -4633,6 +5078,10 @@ def main():
                     key_item_for_current_map.draw(screen, camera_x, camera_y)
                 for safe in safes_for_current_map:
                     safe.draw(screen, camera_x, camera_y)
+                for report in experiment_reports_for_map:
+                    report.draw(screen, camera_x, camera_y, viewed=(report.report_id in report_viewed_ids))
+                if basement_entry_for_map:
+                    basement_entry_for_map.draw(screen, camera_x, camera_y)
                 # 拾取进度条（正在拾取时）
                 if looting_container is not None:
                     elapsed = current_time - looting_start_time
@@ -4835,7 +5284,42 @@ def main():
                     hint = shop_small.render("按 B 关闭", True, (160, 160, 180))
                     screen.blit(hint, (panel.x + panel_w - 100, panel.y + panel_h - 32))
 
-            if not is_map_open and not radar_on and not is_shop_open:
+                # 实验报告覆盖层（二层，按 E 查看，按 Q 再次查看）
+                if report_panel_open:
+                    overlay = pygame.Surface((screen_width, screen_height))
+                    overlay.set_alpha(170)
+                    overlay.fill((0, 0, 0))
+                    screen.blit(overlay, (0, 0))
+                    panel_w, panel_h = 760, 420
+                    panel = pygame.Rect((screen_width - panel_w) // 2, (screen_height - panel_h) // 2, panel_w, panel_h)
+                    pygame.draw.rect(screen, (35, 42, 50), panel)
+                    pygame.draw.rect(screen, (160, 190, 210), panel, 3)
+                    title_font = get_chinese_font(34)
+                    body_font = get_chinese_font(24)
+                    hint_font = get_chinese_font(20)
+                    active_report = None
+                    if report_current_id is not None:
+                        for r in experiment_reports_for_map:
+                            if r.report_id == report_current_id:
+                                active_report = r
+                                break
+                    if active_report is None and experiment_reports_for_map:
+                        active_report = experiment_reports_for_map[0]
+                    title_text = active_report.title if active_report else "二层实验报告：丧尸实验情报"
+                    title = title_font.render(title_text, True, (220, 240, 255))
+                    screen.blit(title, (panel.x + 24, panel.y + 20))
+                    report_lines = active_report.lines if active_report else ["暂无情报"]
+                    for i, line in enumerate(report_lines):
+                        ls = body_font.render(line, True, (235, 235, 235))
+                        screen.blit(ls, (panel.x + 26, panel.y + 90 + i * 56))
+                    progress_txt = hint_font.render(
+                        f"情报进度: {len(report_viewed_ids)}/3", True, (180, 220, 230)
+                    )
+                    screen.blit(progress_txt, (panel.x + 26, panel.y + panel_h - 36))
+                    hint = hint_font.render("按 Q 关闭 / 再次查看", True, (170, 220, 170))
+                    screen.blit(hint, (panel.x + panel_w - 210, panel.y + panel_h - 36))
+
+            if not is_map_open and not radar_on and not is_shop_open and not report_panel_open:
                 # 如果鼠标左键按下且冷却时间已过，则连续发射子弹（使用当前枪械的属性）
                 if left_mouse_down:
                     # 使用当前枪械的射速
@@ -4857,6 +5341,7 @@ def main():
                         is_rpg = (player.current_weapon.name == "rpg")
                         new_bullet = Bullet(muzzle_x, muzzle_y, target_world_x, target_world_y, bullet_image, is_enemy_bullet=False, speed=weapon_bullet_speed, damage=weapon_damage, is_rpg_bullet=is_rpg, explosion_radius=150)
                         bullets.append(new_bullet)
+                        muzzle_flashes.append((muzzle_x, muzzle_y, current_time, 70, 16 if not is_rpg else 24))
                         if not infinite_ammo:
                             player.current_bullets -= 1 # 射击后减少子弹数量
                         else:
@@ -4868,6 +5353,26 @@ def main():
                 for bullet in bullets:
                     bullet.update()
                     bullet.draw(screen, camera_x, camera_y)
+                # 枪口火焰与命中白闪（战斗手感）
+                muzzle_flashes = [mf for mf in muzzle_flashes if current_time - mf[2] <= mf[3]]
+                for fx, fy, st, dur, radius in muzzle_flashes:
+                    p = (current_time - st) / dur
+                    alpha = max(0, int(220 * (1.0 - p)))
+                    surf = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+                    pygame.draw.circle(surf, (255, 220, 120, alpha), (radius, radius), radius)
+                    pygame.draw.circle(surf, (255, 255, 240, alpha), (radius, radius), max(2, radius // 2))
+                    screen.blit(surf, (fx - camera_x - radius, fy - camera_y - radius))
+                hit_flashes = [hf for hf in hit_flashes if current_time - hf[2] <= hf[3]]
+                for hx, hy, st, dur, size in hit_flashes:
+                    p = (current_time - st) / dur
+                    a = max(0, int(200 * (1.0 - p)))
+                    line_len = max(4, int(size * (1.0 - p)))
+                    col = (255, 255, 255, a)
+                    hs = pygame.Surface((size * 2, size * 2), pygame.SRCALPHA)
+                    c = size
+                    pygame.draw.line(hs, col, (c - line_len, c), (c + line_len, c), 2)
+                    pygame.draw.line(hs, col, (c, c - line_len), (c, c + line_len), 2)
+                    screen.blit(hs, (hx - camera_x - size, hy - camera_y - size))
                 
                 # 更新和绘制爆炸特效
                 for explosion in explosions[:]:
@@ -4914,6 +5419,7 @@ def main():
                                 # 普通子弹直接造成伤害
                                 enemy.health -= bullet.damage # 敌人受到伤害（使用子弹的伤害值）
                                 enemy.is_aggroed = True # 敌人被攻击后进入追击模式
+                                hit_flashes.append((enemy.rect.centerx, enemy.rect.centery, current_time, 80, 18))
                                 # 伤害飘字
                                 damage_numbers.append(DamageNumber(enemy.rect.centerx, enemy.rect.top, int(bullet.damage), (255, 255, 100)))
                                 if enemy.health <= 0:
@@ -4965,6 +5471,7 @@ def main():
                                     # 普通子弹直接造成伤害
                                     boss.health -= bullet.damage
                                     boss.is_aggroed = True
+                                    hit_flashes.append((boss.rect.centerx, boss.rect.centery, current_time, 100, 22))
                                     # Boss伤害飘字（红色）
                                     damage_numbers.append(DamageNumber(boss.rect.centerx, boss.rect.top, int(bullet.damage), (255, 100, 100)))
                                     if boss.health <= 0:
@@ -5004,6 +5511,7 @@ def main():
                                     bullets.remove(bullet)
                             else:
                                 zombie.health -= bullet.damage
+                                hit_flashes.append((zombie.rect.centerx, zombie.rect.centery, current_time, 80, 16))
                                 damage_numbers.append(
                                     DamageNumber(zombie.rect.centerx, zombie.rect.top, int(bullet.damage), (120, 255, 120))
                                 )
@@ -5026,6 +5534,40 @@ def main():
                                         Corpse(zombie.rect.centerx, zombie.rect.centery, zombie.original_image, zombie.facing_angle)
                                     )
                                     zombies_for_current_map.remove(zombie)
+                                if bullet in bullets:
+                                    bullets.remove(bullet)
+                            break
+                # 子弹与突变僵尸碰撞检测
+                for bullet in bullets[:]:
+                    for mutant in mutant_zombies_for_current_map[:]:
+                        if pygame.sprite.collide_rect(bullet, mutant):
+                            if bullet.is_rpg_bullet:
+                                apply_explosion_damage(
+                                    bullet.rect.centerx, bullet.rect.centery,
+                                    bullet.explosion_radius, bullet.damage,
+                                    enemies, boss_list, obstacles
+                                )
+                                trigger_screen_shake(12, 450)
+                                if bullet in bullets:
+                                    bullets.remove(bullet)
+                            else:
+                                mutant.health -= bullet.damage
+                                hit_flashes.append((mutant.rect.centerx, mutant.rect.centery, current_time, 100, 22))
+                                damage_numbers.append(
+                                    DamageNumber(mutant.rect.centerx, mutant.rect.top, int(bullet.damage), (255, 120, 120))
+                                )
+                                if mutant.health <= 0:
+                                    kill_count += 1
+                                    coin_reward = 20
+                                    player.coins += coin_reward
+                                    damage_numbers.append(
+                                        DamageNumber(mutant.rect.centerx, mutant.rect.top - 20, coin_reward, (255, 215, 0), is_crit=True)
+                                    )
+                                    corpses_for_current_map.append(
+                                        Corpse(mutant.rect.centerx, mutant.rect.centery, mutant.original_image, mutant.facing_angle)
+                                    )
+                                    mutant_zombies_for_current_map.remove(mutant)
+                                    mutant_alive_count = max(0, mutant_alive_count - 1)
                                 if bullet in bullets:
                                     bullets.remove(bullet)
                             break
@@ -5065,6 +5607,18 @@ def main():
                         pygame.draw.rect(screen, (80, 0, 0), (zx, zy, zw, 5))
                         pygame.draw.rect(screen, (80, 220, 80), (zx, zy, int(zw * hp_ratio), 5))
                         pygame.draw.rect(screen, (200, 200, 200), (zx, zy, zw, 5), 1)
+                # 更新和绘制突变僵尸
+                for mutant in mutant_zombies_for_current_map:
+                    mutant.update(player, current_time, obstacles, enemies, boss_list)
+                    mutant.draw(screen, camera_x, camera_y)
+                    if show_enemy_health:
+                        mx = mutant.rect.x - camera_x
+                        my = mutant.rect.y - camera_y - 14
+                        mw = mutant.rect.width
+                        hp_ratio = max(0, mutant.health / mutant.max_health)
+                        pygame.draw.rect(screen, (90, 0, 0), (mx, my, mw, 6))
+                        pygame.draw.rect(screen, (255, 80, 80), (mx, my, int(mw * hp_ratio), 6))
+                        pygame.draw.rect(screen, (230, 230, 230), (mx, my, mw, 6), 1)
 
                 # 僵尸与敌人/Boss互殴后的死亡清理
                 for enemy in enemies[:]:
@@ -5119,6 +5673,22 @@ def main():
                             break
                     if hit_zombie and bullet in enemy_bullets:
                         enemy_bullets.remove(bullet)
+                # 敌人子弹可误伤突变僵尸
+                for bullet in enemy_bullets[:]:
+                    hit_mutant = False
+                    for mutant in mutant_zombies_for_current_map[:]:
+                        if bullet.rect.colliderect(mutant.rect):
+                            mutant.health -= bullet.damage
+                            if mutant.health <= 0:
+                                corpses_for_current_map.append(
+                                    Corpse(mutant.rect.centerx, mutant.rect.centery, mutant.original_image, mutant.facing_angle)
+                                )
+                                mutant_zombies_for_current_map.remove(mutant)
+                                mutant_alive_count = max(0, mutant_alive_count - 1)
+                            hit_mutant = True
+                            break
+                    if hit_mutant and bullet in enemy_bullets:
+                        enemy_bullets.remove(bullet)
 
                 # 玩家与敌人碰撞检测
                 for enemy in enemies[:]:
@@ -5170,6 +5740,8 @@ def main():
                 prompt_key_item = None
                 prompt_safe = None
                 prompt_locked_door = None
+                prompt_report = None
+                prompt_basement_entry = None
                 if map_level == 1:
                     for m in medkits_for_current_map:
                         if m.used:
@@ -5233,6 +5805,20 @@ def main():
                     if dx * dx + dy * dy < 100 * 100:
                         prompt_locked_door = lock
                         break
+                if map_level == 2 and experiment_reports_for_map:
+                    nearest_report = min(
+                        experiment_reports_for_map,
+                        key=lambda r: (player.rect.centerx - r.rect.centerx) ** 2 + (player.rect.centery - r.rect.centery) ** 2
+                    )
+                    dx = player.rect.centerx - nearest_report.rect.centerx
+                    dy = player.rect.centery - nearest_report.rect.centery
+                    if dx * dx + dy * dy < 100 * 100:
+                        prompt_report = nearest_report
+                if basement_entry_for_map is not None:
+                    dx = player.rect.centerx - basement_entry_for_map.rect.centerx
+                    dy = player.rect.centery - basement_entry_for_map.rect.centery
+                    if dx * dx + dy * dy < 110 * 110:
+                        prompt_basement_entry = basement_entry_for_map
 
                 # 敌人子弹与玩家碰撞检测
                 for bullet in enemy_bullets[:]:
@@ -5299,7 +5885,10 @@ def main():
                 
                 # 绘制当前地图信息
                 map_font = get_chinese_font(24)
-                map_text = map_font.render(f"地图: {map_level}/{max_map_level}", True, (255, 255, 255))
+                if map_level == -1:
+                    map_text = map_font.render("地图: B1", True, (255, 255, 255))
+                else:
+                    map_text = map_font.render(f"地图: {map_level}/{max_map_level}", True, (255, 255, 255))
                 screen.blit(map_text, (10, 70)) # 在弹药下方显示
                 # 金币与手雷（技能商城用）
                 coin_grenade = map_font.render("金币: %d  手雷: %d  [B]商城" % (player.coins, player.grenades), True, (255, 215, 0))
@@ -5318,6 +5907,28 @@ def main():
                 screen.blit(dodge_text, (10, 160))
                 key_text = map_font.render(f"钥匙: {'已获得' if player_has_key else '未获得'}", True, (255, 230, 120))
                 screen.blit(key_text, (10, 190))
+                wave_left = max(0, (next_zombie_wave_time - current_time) // 1000)
+                wave_text = map_font.render(f"僵尸波次: {wave_left}s", True, (120, 255, 120))
+                screen.blit(wave_text, (10, 220))
+                if report_unlocked:
+                    report_hint_text = map_font.render(
+                        f"Q查看实验报告  T找未查看({len(report_viewed_ids)}/3)", True, (170, 220, 240)
+                    )
+                    screen.blit(report_hint_text, (10, 250))
+                unlock_state = "已解锁" if basement_unlocked else "未解锁"
+                basement_text = map_font.render(f"K解锁地下入口: {unlock_state} ({len(report_viewed_ids)}/3)", True, (140, 220, 255))
+                screen.blit(basement_text, (10, 280))
+                if roof_objective_active and not player_victory:
+                    roof_text = map_font.render("目标：返回1层并前往天台撤离", True, (255, 200, 120))
+                    screen.blit(roof_text, (10, 310))
+                if mutant_hunt_active and mutant_alive_count > 0:
+                    mutant_text = map_font.render(f"突变僵尸追击中: {mutant_alive_count}", True, (255, 130, 130))
+                    screen.blit(mutant_text, (10, 340))
+                if zombie_wave_notice and current_time - zombie_wave_notice_time < 2200:
+                    warn_font = get_chinese_font(36)
+                    warn = warn_font.render(zombie_wave_notice, True, (140, 255, 140))
+                    warn_rect = warn.get_rect(center=(screen_width // 2, 120))
+                    screen.blit(warn, warn_rect)
                 
                 # === 连杀提示（屏幕中央大字） ===
                 if streak_message and current_time - streak_message_time < 2000:
@@ -5536,6 +6147,14 @@ def main():
                     lock_hint = "按 E 开启门锁" if player_has_key else "门锁需要钥匙"
                     draw_hint_above(screen, prompt_locked_door.rect.centerx, prompt_locked_door.rect.top,
                                     lock_hint, (255, 215, 120), camera_x, camera_y, -30)
+                if prompt_report:
+                    report_state = "已查看" if prompt_report.report_id in report_viewed_ids else "未查看"
+                    draw_hint_above(screen, prompt_report.rect.centerx, prompt_report.rect.top,
+                                    f"按 E 查看情报#{prompt_report.report_id} ({report_state})", (200, 240, 255), camera_x, camera_y, -30)
+                if prompt_basement_entry:
+                    basement_hint = "按 E 返回 1 层" if map_level == -1 else "按 E 进入 -1 层"
+                    draw_hint_above(screen, prompt_basement_entry.rect.centerx, prompt_basement_entry.rect.top,
+                                    basement_hint, (140, 220, 255), camera_x, camera_y, -30)
                 if prompt_medkit:
                     draw_hint_above(screen, prompt_medkit.rect.centerx, prompt_medkit.rect.top,
                                     "按 E 键使用医疗包", (255, 255, 255), camera_x, camera_y, -30)
